@@ -10,7 +10,7 @@
 
 %% API
 -export([list_buckets/0, create_bucket/1, create_bucket/2, delete_bucket/1]).
--export([list_contents/1, list_contents/2, put_object/5, get_object/2]).
+-export([list_contents/1, list_contents/2, put_object/6, get_object/2]).
 -export([info_object/2, delete_object/2]).
 
 %% include record definitions
@@ -161,12 +161,13 @@ list_contents(Bucket, Options) when is_list(Options) ->
 %%
 %% Spec: put_object(Bucket::string(), Key::string(), Data::binary(),
 %%                  ContentType::string(), 
-%%                  Metadata::[{Key::string(), Value::string()}]) ->
+%%                  Metadata::[{Key::string(), Value::string()},
+%%                  StorageClass::atom()]) ->
 %%       {ok, #s3_object_info(key=Key::string(), size=Size::integer())} |
 %%       {error, {Code::string(), Msg::string(), ReqId::string()}}
 %%
-put_object(Bucket, Key, Data, ContentType, Metadata) ->
-    try genericRequest(put, Bucket, Key, [], Metadata, ContentType, Data) of
+put_object(Bucket, Key, Data, ContentType, Metadata, StorageClass) ->
+    try genericRequest(put, Bucket, Key, [], Metadata, ContentType, Data, StorageClass) of
 	{ok, Headers, _Body} -> 
 	    RequestId = case lists:keytake(?S3_REQ_ID_HEADER, 1, Headers) of
 			{value, {_, ReqId}, _} -> ReqId;
@@ -311,6 +312,19 @@ buildMetadataHeaders([{Key, Value}|Tail], Acc) ->
     buildMetadataHeaders(Tail, [{string:to_lower("x-amz-meta-"++Key), Value} 
 				| Acc]).
 
+buildStorageClassHeader(StorageClass, Method) ->
+	case Method of
+		put ->
+		case StorageClass of
+			standard ->
+				[{"x-amz-storage-class", "STANDARD"}];
+			reduced_redundancy ->
+				[{"x-amz-storage-class", "REDUCED_REDUNDANCY"}];
+			_ -> []
+		end;
+		_ -> []
+	end.
+
 buildContentMD5Header(ContentMD5) ->
     case ContentMD5 of
 	"" -> [];
@@ -331,10 +345,15 @@ sign (Key,Data) ->
 genericRequest( Method, Bucket, Path, QueryParams, Metadata,
 		ContentType, Body ) ->
     genericRequest( Method, Bucket, Path, QueryParams, Metadata,
-		    ContentType, Body, ?NR_OF_RETRIES).
+		    ContentType, Body, standard, ?NR_OF_RETRIES).
+
+genericRequest( Method, Bucket, Path, QueryParams, Metadata,
+		ContentType, Body, StorageClass ) ->
+    genericRequest( Method, Bucket, Path, QueryParams, Metadata,
+		    ContentType, Body, StorageClass, ?NR_OF_RETRIES).
 
 genericRequest( Method, Bucket, Path, QueryParams, Metadata, 
-		ContentType, Body, NrOfRetries) ->
+		ContentType, Body, StorageClass, NrOfRetries) ->
     Date = httpd_util:rfc1123_date(erlang:localtime()),
     MethodString = string:to_upper( atom_to_list(Method) ),
     Url = buildUrl(Bucket,Path,QueryParams),
@@ -346,6 +365,7 @@ genericRequest( Method, Bucket, Path, QueryParams, Metadata,
     
     Headers = buildContentHeaders( Body, ContentType ) ++
 	buildMetadataHeaders(Metadata) ++ 
+	buildStorageClassHeader(StorageClass, Method) ++ 
 	buildContentMD5Header(ContentMD5),
     
     {AccessKey, SecretAccessKey } = {AWS_KEY, AWS_SEC_KEY},
@@ -392,7 +412,7 @@ genericRequest( Method, Bucket, Path, QueryParams, Metadata,
 	      _ResponseBody }} when Code=:=500 ->
 	    timer:sleep((?NR_OF_RETRIES-NrOfRetries)*500),
 	    genericRequest(Method, Bucket, Path, QueryParams, 
-			   Metadata, ContentType, Body, NrOfRetries-1);
+			   Metadata, ContentType, Body, standard, NrOfRetries-1);
 	
  	{ok, {{_HttpVersion, _HttpCode, _ReasonPhrase}, ResponseHeaders, 
 	      ResponseBody }} ->
